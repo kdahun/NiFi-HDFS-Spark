@@ -1,0 +1,231 @@
+version: '3.8'
+
+# ================================================================
+# VDES 빅데이터 플랫폼 - Lambda Architecture (개발/테스트)
+# 구성: HDFS + Spark Standalone + NiFi
+# 라이선스: 전체 Apache 2.0 (상용 가능)
+# 외부 연동: Kafka (별도 구성), Cassandra (별도 구성)
+#
+# [포트 정리]
+#   9870  : HDFS NameNode Web UI
+#   9000  : HDFS RPC
+#   8090  : Spark Master Web UI (8080 충돌 회피)
+#   7077  : Spark Master RPC
+#   8091  : Spark Worker 1 Web UI (Batch Layer)
+#   8092  : Spark Worker 2 Web UI (Speed Layer)
+#   18080 : Spark History Server UI
+#   8443  : NiFi Web UI (HTTPS)
+#
+# [데이터 저장 경로 (Bind Mount)]
+#   ./data/namenode    : HDFS NameNode 메타데이터
+#   ./data/datanode    : HDFS DataNode 실제 데이터
+#   ./data/nifi/data   : NiFi 플로우 데이터
+#   ./data/nifi/logs   : NiFi 로그
+#   ./data/nifi/conf   : NiFi 설정
+# ================================================================
+
+networks:
+  lambda-net:
+    driver: bridge
+
+services:
+
+  # ═══════════════════════════════════════════════════════════════
+  # HDFS - NameNode
+  # 이미지: apache/hadoop (Apache 2.0)
+  # 역할: HDFS 메타데이터 관리, Data Lake 진입점
+  # ═══════════════════════════════════════════════════════════════
+  namenode:
+    image: apache/hadoop:3.3.6
+    hostname: namenode
+    container_name: namenode
+    command: ["hdfs", "namenode"]
+    ports:
+      - "9870:9870"   # HDFS Web UI
+      - "9000:9000"   # HDFS RPC
+    environment:
+      ENSURE_NAMENODE_DIR: "/tmp/hadoop-root/dfs/name"
+    volumes:
+      - ./hadoop/config:/opt/hadoop/etc/hadoop
+      - ./data/namenode:/tmp/hadoop-root/dfs/name
+    networks:
+      - lambda-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ───────────────────────────────────────────────────────────────
+  # HDFS - DataNode (개발환경: 1개, replication=1)
+  # 역할: 실제 데이터 블록 저장 (AIS/ASM/VDE raw 메시지)
+  # ───────────────────────────────────────────────────────────────
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: datanode
+    hostname: datanode
+    command: ["hdfs", "datanode"]
+    user: "0"
+    ports:
+      - "9864:9864"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - ./hadoop/config:/opt/hadoop/etc/hadoop
+      - ./data/datanode:/tmp/hadoop-root/dfs/data
+    networks:
+      - lambda-net
+
+  # ═══════════════════════════════════════════════════════════════
+  # Apache NiFi
+  # 이미지: apache/nifi (Apache 2.0)
+  # 역할: Kafka → HDFS 데이터 수집/적재 (Batch Layer 수집)
+  #        - Kafka 토픽(ais/asm/vde/vsi) 구독
+  #        - JSON 변환 후 HDFS Data Lake에 적재
+  #        - 자체 재시도/복구로 안정적 수집 보장
+  # ═══════════════════════════════════════════════════════════════
+  nifi:
+    image: apache/nifi:1.23.2
+    container_name: nifi
+    hostname: nifi
+    ports:
+      - "8443:8443"   # NiFi Web UI (HTTPS)
+    environment:
+      - TZ=Asia/Seoul
+      # 초기 관리자 계정 (최초 1회 설정 후 변경 권장)
+      - NIFI_WEB_HTTPS_PORT=8443
+      - SINGLE_USER_CREDENTIALS_USERNAME=admin
+      - SINGLE_USER_CREDENTIALS_PASSWORD=adminpassword123!
+      # HDFS 연동
+      - NIFI_HADOOP_CONFIGURATION_RESOURCES=/opt/nifi/conf/hdfs/core-site.xml,/opt/nifi/conf/hdfs/hdfs-site.xml
+      # 외부 Kafka 연동
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_HOST:-host.docker.internal}:${KAFKA_PORT:-9092}
+    volumes:
+      - ./data/nifi/data:/opt/nifi/nifi-current/data
+      - ./data/nifi/logs:/opt/nifi/nifi-current/logs
+      # - ./data/nifi/conf:/opt/nifi/nifi-current/conf
+      # HDFS 설정 파일 공유
+      - ./hadoop/config/core-site.xml:/opt/nifi/conf/hdfs/core-site.xml:ro
+      - ./hadoop/config/hdfs-site.xml:/opt/nifi/conf/hdfs/hdfs-site.xml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 외부 Kafka 접근용
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - lambda-net
+    healthcheck:
+      test: ["CMD", "curl", "-kf", "https://localhost:8443/nifi"]
+      interval: 60s
+      timeout: 20s
+      retries: 5
+      start_period: 90s   # NiFi 초기 기동 시간 여유
+
+  # ═══════════════════════════════════════════════════════════════
+  # Spark - Master (Standalone 모드)
+  # 이미지: apache/spark (Apache 2.0) - bitnami 대체
+  # 역할: Spark 잡 스케줄링 및 리소스 관리
+  # ═══════════════════════════════════════════════════════════════
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    hostname: spark-master
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*"]
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8090
+    ports:
+      - "8090:8090"   # Spark Web UI
+      - "7077:7077"   # Spark Master RPC
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lambda-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ───────────────────────────────────────────────────────────────
+  # Spark - Worker 1 (Batch Layer 전담)
+  # 역할: Rule-based 무결성 판정, ML Scoring 배치 처리
+  # - 대량 데이터를 한 번에 처리하므로 메모리 2G로 넉넉하게 설정
+  # - spark-submit 시 --total-executor-cores 2 로 이 Worker만 사용
+  # ───────────────────────────────────────────────────────────────
+  spark-worker-1:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    environment:
+      - SPARK_WORKER_MEMORY=2G    # Batch는 대량 처리이므로 2G 유지
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_WEBUI_PORT=8091
+    ports:
+      - "8091:8091"   # Spark Worker 1 Web UI
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lambda-net
+
+  # ───────────────────────────────────────────────────────────────
+  # Spark - Worker 2 (Speed Layer 전담 - Structured Streaming)
+  # 역할: Kafka에서 실시간으로 메시지를 읽어 무결성 실시간 검사
+  # - Batch보다 메모리 작게 설정 (소량씩 지속 처리)
+  # - restart: always → Streaming은 항상 살아있어야 함
+  # ───────────────────────────────────────────────────────────────
+  spark-worker-2:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    environment:
+      - SPARK_WORKER_MEMORY=1G    # Streaming은 소량씩 처리하므로 1G로 충분
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_WEBUI_PORT=8092
+    ports:
+      - "8092:8092"   # Spark Worker 2 Web UI
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: always               # Streaming Worker는 항상 자동 재시작
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lambda-net
+
+  # ───────────────────────────────────────────────────────────────
+  # Spark - History Server
+  # 역할: 완료된 Spark 잡 이력 조회 (배치/스트리밍 결과 확인)
+  # ───────────────────────────────────────────────────────────────
+  spark-history:
+    image: apache/spark:3.5.0
+    container_name: spark-history
+    hostname: spark-history
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-history-server.sh && tail -f /opt/spark/logs/*"]
+    ports:
+      - "18080:18080"  # Spark History Server UI
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    volumes:
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+    networks:
+      - lambda-net

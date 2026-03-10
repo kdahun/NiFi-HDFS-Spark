@@ -1,0 +1,9 @@
+data/
+**/logs/
+**/tmp/
+**/.DS_Store
+**/Thumbs.db
+
+# Optional (uncomment if used locally)
+# .env
+# hadoop/config/*-site.xml
