@@ -40,6 +40,7 @@ services:
     hostname: namenode
     container_name: namenode
     command: ["hdfs", "namenode"]
+    restart: unless-stopped
     ports:
       - "9870:9870"   # HDFS Web UI
       - "9000:9000"   # HDFS RPC
@@ -65,6 +66,7 @@ services:
     container_name: datanode
     hostname: datanode
     command: ["hdfs", "datanode"]
+    restart: unless-stopped
     user: "0"
     ports:
       - "9864:9864"
@@ -84,11 +86,17 @@ services:
   #        - Kafka 토픽(ais/asm/vde/vsi) 구독
   #        - JSON 변환 후 HDFS Data Lake에 적재
   #        - 자체 재시도/복구로 안정적 수집 보장
+  #
+  # [NiFi conf 볼륨 초기화 방법]
+  #   최초 1회: docker compose up -d nifi (주석 상태로 먼저 기동)
+  #             docker cp nifi:/opt/nifi/nifi-current/conf/. ./data/nifi/conf/
+  #             아래 볼륨 주석 해제 후 docker compose restart nifi
   # ═══════════════════════════════════════════════════════════════
   nifi:
     image: apache/nifi:1.23.2
     container_name: nifi
     hostname: nifi
+    restart: unless-stopped
     ports:
       - "8443:8443"   # NiFi Web UI (HTTPS)
     environment:
@@ -104,7 +112,7 @@ services:
     volumes:
       - ./data/nifi/data:/opt/nifi/nifi-current/data
       - ./data/nifi/logs:/opt/nifi/nifi-current/logs
-      # - ./data/nifi/conf:/opt/nifi/nifi-current/conf
+      - ./data/nifi/conf:/opt/nifi/nifi-current/conf
       # HDFS 설정 파일 공유
       - ./hadoop/config/core-site.xml:/opt/nifi/conf/hdfs/core-site.xml:ro
       - ./hadoop/config/hdfs-site.xml:/opt/nifi/conf/hdfs/hdfs-site.xml:ro
@@ -132,6 +140,7 @@ services:
     container_name: spark-master
     hostname: spark-master
     entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*"]
+    restart: unless-stopped
     environment:
       - SPARK_MASTER_HOST=spark-master
       - SPARK_MASTER_PORT=7077
@@ -165,6 +174,7 @@ services:
     container_name: spark-worker-1
     hostname: spark-worker-1
     entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    restart: unless-stopped
     environment:
       - SPARK_WORKER_MEMORY=2G    # Batch는 대량 처리이므로 2G 유지
       - SPARK_WORKER_CORES=2
@@ -185,13 +195,14 @@ services:
   # Spark - Worker 2 (Speed Layer 전담 - Structured Streaming)
   # 역할: Kafka에서 실시간으로 메시지를 읽어 무결성 실시간 검사
   # - Batch보다 메모리 작게 설정 (소량씩 지속 처리)
-  # - restart: always → Streaming은 항상 살아있어야 함
+  # - restart: unless-stopped → 수동 down 시엔 재시작 안 함
   # ───────────────────────────────────────────────────────────────
   spark-worker-2:
     image: apache/spark:3.5.0
     container_name: spark-worker-2
     hostname: spark-worker-2
     entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    restart: unless-stopped
     environment:
       - SPARK_WORKER_MEMORY=1G    # Streaming은 소량씩 처리하므로 1G로 충분
       - SPARK_WORKER_CORES=2
@@ -201,7 +212,6 @@ services:
     depends_on:
       spark-master:
         condition: service_healthy
-    restart: always               # Streaming Worker는 항상 자동 재시작
     volumes:
       - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
     extra_hosts:
@@ -218,6 +228,7 @@ services:
     container_name: spark-history
     hostname: spark-history
     entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-history-server.sh && tail -f /opt/spark/logs/*"]
+    restart: unless-stopped
     ports:
       - "18080:18080"  # Spark History Server UI
     depends_on:
