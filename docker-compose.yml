@@ -139,7 +139,7 @@ services:
     image: apache/spark:3.5.0
     container_name: spark-master
     hostname: spark-master
-    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*"]
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-master.sh && sleep infinity"]
     restart: unless-stopped
     environment:
       - SPARK_MASTER_HOST=spark-master
@@ -173,7 +173,7 @@ services:
     image: apache/spark:3.5.0
     container_name: spark-worker-1
     hostname: spark-worker-1
-    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && sleep infinity"]
     restart: unless-stopped
     environment:
       - SPARK_WORKER_MEMORY=2G    # Batch는 대량 처리이므로 2G 유지
@@ -201,7 +201,7 @@ services:
     image: apache/spark:3.5.0
     container_name: spark-worker-2
     hostname: spark-worker-2
-    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /opt/spark/logs/*"]
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && sleep infinity"]
     restart: unless-stopped
     environment:
       - SPARK_WORKER_MEMORY=1G    # Streaming은 소량씩 처리하므로 1G로 충분
@@ -227,7 +227,7 @@ services:
     image: apache/spark:3.5.0
     container_name: spark-history
     hostname: spark-history
-    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-history-server.sh && tail -f /opt/spark/logs/*"]
+    entrypoint: ["/bin/bash", "-c", "/opt/spark/sbin/start-history-server.sh && sleep infinity"]
     restart: unless-stopped
     ports:
       - "18080:18080"  # Spark History Server UI

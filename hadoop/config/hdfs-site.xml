@@ -15,7 +15,7 @@
   </property>
   <property>
     <name>dfs.blocksize</name>
-    <value>134217728</value>
+    <value>33554432</value>
   </property>
   <property>
     <name>dfs.permissions.enabled</name>
